@@ -1,9 +1,11 @@
-# Discord bot music lavalink 24/7
-
-# Start
+## Running
 ```bash
 npm install
 ```
 ```bash
 node index.js
+```
+## Setup
+```
+/music noptoggle
 ```

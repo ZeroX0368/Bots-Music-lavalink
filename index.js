@@ -7,7 +7,7 @@ const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 const token = config.token;
 const express = require('express');
 const app = express();
-const port = 3000;
+const port = 20247;
 
 app.get('/', (req, res) => {
   res.send('Discord Music Bot is running!');
@@ -16,7 +16,6 @@ app.get('/', (req, res) => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`Express server running on port ${port}`);
 });
-
 
 const { Manager } = require('erela.js');
 
@@ -31,6 +30,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
@@ -45,6 +46,9 @@ const manager = new Manager({
   clientName: `${client.user?.username || 'Music Bot'}`,
   plugins: []
 });
+
+// Store noptoggle settings per channel
+const noptoggleChannels = new Map();
 
 const commands = [
   new SlashCommandBuilder()
@@ -134,7 +138,15 @@ const commands = [
     .addSubcommand(subcommand =>
       subcommand
         .setName('247')
-        .setDescription('Toggle 24/7 mode')),
+        .setDescription('Toggle 24/7 mode'))
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('noptoggle')
+        .setDescription('Toggle auto-play on message')
+        .addChannelOption(option =>
+          option.setName('channel')
+            .setDescription('The channel to toggle auto-play for (optional, defaults to current channel)')
+            .setRequired(false))),
   new SlashCommandBuilder()
     .setName('bot')
     .setDescription('Bot utility commands')
@@ -157,9 +169,19 @@ const commands = [
     .addSubcommand(subcommand =>
       subcommand
         .setName('support')
-        .setDescription('Join our support server')),
-
-
+        .setDescription('Join our support server'))
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('uptime')
+        .setDescription('Check the bot\'s uptime'))
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('leave')
+        .setDescription('Make the bot leave a server (Owner only)')
+        .addStringOption(option =>
+          option.setName('serverid')
+            .setDescription('Server ID to leave')
+            .setRequired(true))),
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(token);
@@ -191,6 +213,86 @@ function createMusicEmbed(track) {
     )
     .setThumbnail(track.thumbnail)
     .setColor(config.embedColor);
+}
+
+function createMusicCard(player) {
+  const track = player.queue.current;
+  if (!track) return null;
+
+  const progressBar = createProgressBar(player.position, track.duration);
+
+  const embed = new EmbedBuilder()
+    .setTitle('🎵 Music Player')
+    .setDescription(`**[${track.title}](${track.uri})**\nby ${track.author}`)
+    .addFields(
+      { name: '⏱️ Progress', value: `${formatDuration(player.position)} / ${formatDuration(track.duration)}`, inline: true },
+      { name: '🔊 Volume', value: `${player.volume}%`, inline: true },
+      { name: '🔁 Loop', value: player.queueRepeat ? 'Queue' : player.trackRepeat ? 'Track' : 'Off', inline: true },
+      { name: '📊 Progress Bar', value: progressBar, inline: false }
+    )
+    .setThumbnail(track.thumbnail)
+    .setColor(config.embedColor)
+    .setTimestamp();
+
+  const buttons = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('musiccard_previous')
+        .setEmoji('⏮️')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_pause')
+        .setEmoji(player.paused ? '▶️' : '⏸️')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_skip')
+        .setEmoji('⏭️')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_stop')
+        .setEmoji('⏹️')
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId('musiccard_refresh')
+        .setEmoji('🔄')
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+  const secondRow = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('musiccard_shuffle')
+        .setEmoji('🔀')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_loop')
+        .setEmoji('🔁')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_queue')
+        .setEmoji('📜')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_volume_down')
+        .setEmoji('🔉')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('musiccard_volume_up')
+        .setEmoji('🔊')
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+  return { embeds: [embed], components: [buttons, secondRow] };
+}
+
+function createProgressBar(current, total) {
+  const percentage = (current / total) * 100;
+  const progressBarLength = 20;
+  const filledLength = Math.round((percentage / 100) * progressBarLength);
+  const emptyLength = progressBarLength - filledLength;
+
+  const progressBar = '█'.repeat(filledLength) + '░'.repeat(emptyLength);
+  return `${progressBar} ${Math.round(percentage)}%`;
 }
 
 function formatDuration(duration) {
@@ -235,8 +337,95 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: 'You need to join a voice channel to use the buttons!', ephemeral: true });
     }
     const player = manager.players.get(interaction.guild.id);
-    if (!player) return;
+    if (!player) return interaction.reply({ content: 'No music is playing!', ephemeral: true });
 
+    // Handle music card buttons
+    if (interaction.customId.startsWith('musiccard_')) {
+      const action = interaction.customId.replace('musiccard_', '');
+
+      switch (action) {
+        case 'pause':
+          player.pause(!player.paused);
+          const musicCard = createMusicCard(player);
+          if (musicCard) {
+            await interaction.update(musicCard);
+          }
+          break;
+        case 'skip':
+          if (player.queue.length === 0) {
+            await interaction.reply({ content: 'No more songs in queue!', ephemeral: true });
+            return;
+          }
+          player.stop();
+          await interaction.reply({ content: 'Skipped to next song!', ephemeral: true });
+          break;
+        case 'previous':
+          await interaction.reply({ content: 'Previous functionality not available with current setup!', ephemeral: true });
+          break;
+        case 'stop':
+          player.destroy();
+          await interaction.reply({ content: 'Music stopped and disconnected!', ephemeral: true });
+          break;
+        case 'shuffle':
+          player.queue.shuffle();
+          await interaction.reply({ content: 'Queue shuffled!', ephemeral: true });
+          break;
+        case 'loop':
+          if (player.queueRepeat) {
+            player.setQueueRepeat(false);
+            player.setTrackRepeat(true);
+          } else if (player.trackRepeat) {
+            player.setTrackRepeat(false);
+          } else {
+            player.setQueueRepeat(true);
+          }
+          const updatedCard = createMusicCard(player);
+          if (updatedCard) {
+            await interaction.update(updatedCard);
+          }
+          break;
+        case 'queue':
+          const queue = player.queue;
+          const currentTrack = player.queue.current;
+          let description = queue.length > 0 ? queue.slice(0, 10).map((track, i) => 
+            `${i + 1}. [${track.title}](${track.uri})`).join('\n') : 'No songs in queue';
+
+          if (currentTrack) description = `**Now Playing:**\n[${currentTrack.title}](${currentTrack.uri})\n\n**Queue:**\n${description}`;
+
+          const embed = new EmbedBuilder()
+            .setTitle('Queue')
+            .setDescription(description)
+            .setColor(config.embedColor)
+            .setTimestamp();
+          await interaction.reply({ embeds: [embed], ephemeral: true });
+          break;
+        case 'volume_up':
+          const newVolumeUp = Math.min(player.volume + 10, 100);
+          player.setVolume(newVolumeUp);
+          const cardUp = createMusicCard(player);
+          if (cardUp) {
+            await interaction.update(cardUp);
+          }
+          break;
+        case 'volume_down':
+          const newVolumeDown = Math.max(player.volume - 10, 0);
+          player.setVolume(newVolumeDown);
+          const cardDown = createMusicCard(player);
+          if (cardDown) {
+            await interaction.update(cardDown);
+          }
+          break;
+        case 'refresh':
+          const refreshedCard = createMusicCard(player);
+          if (refreshedCard) {
+            await interaction.update(refreshedCard);
+          }
+          break;
+      }
+      return;
+    }
+
+    // Handle regular control buttons
     const currentTrack = player.queue.current;
     if (!currentTrack) return;
 
@@ -602,6 +791,26 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.reply({ embeds: [embed] });
     }
+
+    if (subcommand === 'noptoggle') {
+      const channel = options.getChannel('channel') || interaction.channel;
+      const channelId = channel.id;
+
+      // Toggle the setting
+      const currentSetting = noptoggleChannels.get(channelId) || false;
+      noptoggleChannels.set(channelId, !currentSetting);
+
+      const embed = new EmbedBuilder()
+        .setDescription(`🎵 Auto-play for ${channel} is now ${!currentSetting ? 'enabled' : 'disabled'}\n\n• Just type command names directly\n• Example: \`play never gonna give you up\`\n• This works in all servers where I'm present`)
+        .setColor(config.embedColor)
+        .setFooter({ 
+          text: `Requested by ${interaction.user.tag}`,
+          iconURL: interaction.user.displayAvatarURL()
+        })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+    }
   }
 
   if (commandName === 'bot') {
@@ -610,37 +819,33 @@ client.on('interactionCreate', async (interaction) => {
     if (subcommand === 'help') {
       const embed = new EmbedBuilder()
         .setTitle(`🎵 ${client.user.username} Commands`)
-        .setDescription('Your ultimate music companion with high-quality playback!')
-        .addFields(
-          { name: '🎵 Music Controls', value: 
-            '`/music play` - Play a song from name/URL\n' +
-            '`/music pause` - ⏸️ Pause current playback\n' +
-            '`/music resume` - ▶️ Resume playback\n' +
-            '`/music stop` - ⏹️ Stop and disconnect\n' +
-            '`/music skip` - ⏭️ Skip to next song\n' +
-            '`/music volume` - 🔊 Adjust volume (0-100)'
-          },
-          { name: '📑 Queue Management', value: 
-            '`/music queue` - 📜 View current queue\n' +
-            '`/music nowplaying` - 🎵 Show current track\n' +
-            '`/music shuffle` - 🔀 Shuffle the queue\n' +
-            '`/music loop` - 🔁 Set loop mode\n' +
-            '`/music remove` - ❌ Remove a song\n' +
-            '`/music move` - ↕️ Move track position\n' +
-            '`/music clearqueue` - 🗑️ Clear the queue'
-          },
-          { name: '⚙️ Utility', value: 
-            '`/music 247` - 🔄 Toggle 24/7 mode\n' +
-            '`/bot ping` - 📡 Check latency\n' +
-            '`/bot stats` - 📊 View statistics\n' +
-            '`/bot invite` - 📨 Invite bot to server\n' +
-            '`/bot support` - 💬 Join support server'
-          }
+        .setDescription('Here are the available commands:\n\n' +
+          '**🎵 Music Commands:**\n' +
+          '/music play <query> - Play a song from name/URL\n' +
+          '/music pause - Pause current playback\n' +
+          '/music resume - Resume playback\n' +
+          '/music skip - Skip to next song\n' +
+          '/music stop - Stop and disconnect\n' +
+          '/music queue - View current queue\n' +
+          '/music nowplaying - Show current track\n' +
+          '/music shuffle - Shuffle the queue\n' +
+          '/music loop <mode> - Set loop mode\n' +
+          '/music remove <position> - Remove a song\n' +
+          '/music clearqueue - Clear the queue\n' +
+          '/music volume <level> - Set volume (0-100)\n' +
+          '/music 247 - Toggle 24/7 mode\n' +
+          '/music noptoggle [channel] - Toggle auto-play on message\n\n' +
+          '**🤖 Bot Commands:**\n' +
+          '/bot uptime - Check the bot\'s uptime\n' +
+          '/bot ping - Check the bot\'s latency\n' +
+          '/bot help - Display this help message\n' +
+          '/bot invite - Get the bot invite link\n' +
+          '/bot leave <serverid> - Make the bot leave a server (Owner only)'
         )
         .setColor(config.embedColor)
         .setThumbnail(client.user.displayAvatarURL())
         .setFooter({ 
-          text: `Made By Unknownz • Requested by ${interaction.user.tag}`,
+          text: `Made By bucu0368 • Requested by ${interaction.user.tag}`,
           iconURL: interaction.user.displayAvatarURL()
         })
         .setTimestamp();
@@ -702,7 +907,7 @@ client.on('interactionCreate', async (interaction) => {
     if (subcommand === 'support') {
       const embed = new EmbedBuilder()
         .setTitle('💬 Support Server')
-        .setDescription(`[Click here to join our support server](${process.env.SUPPORT_SERVER})`)
+        .setDescription(`[Click here to join our support server](${config.SUPPORT_SERVER})`)
         .setColor(config.embedColor)
         .setFooter({ 
           text: `Requested by ${interaction.user.tag}`,
@@ -711,10 +916,114 @@ client.on('interactionCreate', async (interaction) => {
         .setTimestamp();
       await interaction.reply({ embeds: [embed] });
     }
+
+    if (subcommand === 'uptime') {
+      const uptime = Math.round(client.uptime / 1000);
+      const seconds = uptime % 60;
+      const minutes = Math.floor((uptime % 3600) / 60);
+      const hours = Math.floor((uptime % 86400) / 3600);
+      const days = Math.floor(uptime / 86400);
+
+      const embed = new EmbedBuilder()
+        .setTitle('⌚ Bot Uptime')
+        .setDescription(`${days} days  ${hours} hours ${minutes} minutes ${seconds} seconds`)
+        .setColor(config.embedColor)
+        .setFooter({ 
+          text: `Requested by ${interaction.user.tag}`,
+          iconURL: interaction.user.displayAvatarURL()
+        })
+        .setTimestamp();
+      await interaction.reply({ embeds: [embed] });
+    }
+
+    if (subcommand === 'leave') {
+      const ownerId = config.ownerId;
+      if (interaction.user.id !== ownerId) {
+        return interaction.reply({ content: 'Only the bot owner can use this command!', ephemeral: true });
+      }
+
+      const serverId = options.getString('serverid');
+      const guild = client.guilds.cache.get(serverId);
+
+      if (!guild) {
+        return interaction.reply({ content: 'Guild not found or bot is not in that server!', ephemeral: true });
+      }
+
+      try {
+        await guild.leave();
+        const embed = new EmbedBuilder()
+          .setDescription(`✅ Successfully left server: ${guild.name} (${serverId})`)
+          .setColor(config.embedColor)
+          .setFooter({ 
+            text: `Requested by ${interaction.user.tag}`,
+            iconURL: interaction.user.displayAvatarURL()
+          })
+          .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+      } catch (error) {
+        await interaction.reply({ content: 'Failed to leave the server!', ephemeral: true });
+      }
+    }
   }
-
-
 });
+
+client.on('messageCreate', async message => {
+  if (message.author.bot) return;
+
+  const channelId = message.channel.id;
+  if (noptoggleChannels.has(channelId) && noptoggleChannels.get(channelId)) {
+    // Check if the message content indicates playing music
+    if (message.content.toLowerCase().startsWith('play ')) {
+      const query = message.content.substring(5).trim(); // Extract the query after "play "
+
+      if (!message.member.voice.channel) {
+        return message.reply(' Join a voice channel first!');
+      }
+
+      const player = manager.create({
+        guild: message.guild.id,
+        voiceChannel: message.member.voice.channel.id,
+        textChannel: message.channel.id,
+        selfDeafen: true
+      });
+
+      if (!player.twentyFourSeven) player.twentyFourSeven = false;
+
+      player.connect();
+
+      const res = await manager.search(query, message.author);
+
+      switch (res.loadType) {
+        case 'TRACK_LOADED':
+        case 'SEARCH_RESULT':
+          if (!res.tracks || res.tracks.length === 0) {
+            message.reply('No results found! Please try a different search term.');
+            return;
+          }
+          const track = res.tracks[0];
+          player.queue.add(track);
+          const embed = new EmbedBuilder()
+            .setDescription(`Added [${track.title}](${track.uri}) to the queue`)
+            .setColor(config.embedColor)
+            .setFooter({ 
+              text: `Requested by ${message.author.tag}`,
+              iconURL: message.author.displayAvatarURL()
+            })
+            .setTimestamp();
+          message.reply({ embeds: [embed] });
+          if (!player.playing && !player.paused) player.play();
+          break;
+        case 'NO_MATCHES':
+          message.reply('No results found! Please try a different search term.');
+          break;
+        case 'LOAD_FAILED':
+          message.reply('Failed to load track! Please try again or use a different link.');
+          break;
+      }
+    }
+  }
+});
+
 
 manager.on('nodeConnect', (node) => {
   console.log(`Node ${node.options.identifier} connected`);
