@@ -1,7 +1,7 @@
 
 {
-  "token": "you bot token",
+  "token": "",
   "embedColor": "#0099ff",
-  "SUPPORT_SERVER": "https://discord.gg/SFWep5tm",
-  "ownerId": "1142053791781355561"
+  "ownerId": "YOUR_USER_ID_HERE",
+  "SUPPORT_SERVER": "https://discord.gg/your-support-server"
 }
