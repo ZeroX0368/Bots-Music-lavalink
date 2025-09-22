@@ -1,5 +1,5 @@
 
-const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits } = require('discord.js');
 
 function createMusicEmbed(track, config) {
   return new EmbedBuilder()
@@ -51,6 +51,7 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('music')
     .setDescription('Music bot commands')
+.setDefaultMemberPermissions(PermissionFlagsBits.UseApplicationCommands)
     .addSubcommand(subcommand =>
       subcommand
         .setName('play')
